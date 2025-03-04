@@ -1,0 +1,194 @@
+#Importing the necessary libraries
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np  # Needed this to allocate words to the topics in LSA and LDA for TF-IDF and to better visualize the heatmap in LDA using BoW
+from spellchecker import SpellChecker # Realized I needed to fix spelling as the dataset contains words like aaccount instead of account
+import re # Realized I needed to use regular expressions instead of pandas to remove placeholders since the text is tokenized
+import nltk
+from nltk.corpus import stopwords
+from nltk import pos_tag
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD, LatentDirichletAllocation
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+
+#Loading and correcting the dataset
+theFile = pd.read_csv("Consumer_Complaints.csv", nrows=10000) #I set the number of rows to 10000 as the whole dataset is to big to run for my computer and the fixing spelling mistakes takes very long
+dataframe = theFile["Consumer complaint narrative"].dropna()  #This let's us focus on just the “Consumer Complaints Narrative” section and remove blank complaints
+print("This is the text before it has been cleaned")
+print(dataframe.head())
+print()
+
+
+#Cleaning the text
+
+#Tokenize the text 
+dataframe = dataframe.apply(lambda x: word_tokenize(x)) 
+
+#Making the text lowercase and removing the punctuation
+def lowerAndRemovePunc(text):
+    return [word.lower() for word in text if word.isalpha()]
+dataframe = dataframe.apply(lowerAndRemovePunc)
+
+#Remove stopwords
+stop_words=set(stopwords.words('english'))
+def remove_stopwords(text):
+    return [word for word in text if word not in stop_words]
+dataframe = dataframe.apply(remove_stopwords)
+
+#Lemmatization
+lemmatizer = WordNetLemmatizer()
+def lemmatize_words(text):
+    # Tagging part of speech for each word, this was needed for more accurate lemmatization
+    tagged_words = pos_tag(text)
+    lemmatized_words = []
+    for word, tag in tagged_words:
+        # If the word is a verb
+        if tag.startswith('V'):
+            lemmatized_words.append(lemmatizer.lemmatize(word, pos='v'))
+        # If the word is a noun
+        elif tag.startswith('N'):
+            lemmatized_words.append(lemmatizer.lemmatize(word, pos='n'))
+        # If the word is an adjective
+        elif tag.startswith('J'):
+            lemmatized_words.append(lemmatizer.lemmatize(word, pos='a'))
+        else:
+            lemmatized_words.append(word)
+    return lemmatized_words
+dataframe = dataframe.apply(lemmatize_words)
+
+#Remove placeholders
+def remove_placeholder_tokens(tokens):
+    # Remove tokens that are entirely made up of 1 to 15 "x" characters using regular expressions instead of pandas on the tokenized text
+    return [token for token in tokens if not re.fullmatch(r'x{1,15}', token)]
+dataframe = dataframe.apply(remove_placeholder_tokens)
+
+#Convert the dataset back to a string since the need for tokenization is now done and fix spelling mistakes
+dataframe = dataframe.apply(lambda tokens: " ".join(tokens))
+spell = SpellChecker()
+def correct_text(text):
+    words = text.split()
+    corrected_words = [spell.correction(word) if spell.correction(word) else word for word in words]
+    return " ".join(corrected_words)
+dataframe = dataframe.apply(correct_text)
+print("This is the text after it has been cleaned")
+print(dataframe.head())
+print()
+
+
+
+#Text Vectorization
+
+#Vectorization with BoW
+vectorizer_bow = CountVectorizer()
+bow_model = vectorizer_bow.fit_transform(dataframe)
+bow_model = pd.DataFrame(bow_model.toarray(), columns = vectorizer_bow.get_feature_names_out())
+print("This is the BoW vector representations")
+print(bow_model)
+print()
+
+#Vectorization using TF-IDF
+vectorizer_tfidf = TfidfVectorizer(max_features=1000, stop_words="english", max_df=0.95, min_df=2)
+tfidf_model = vectorizer_tfidf.fit_transform(dataframe)
+tfidf_model = pd.DataFrame(tfidf_model.toarray(), columns = vectorizer_tfidf.get_feature_names_out())
+print("This is the TF-IDF vector representations")
+print(tfidf_model)
+print()
+
+
+
+#Semantic Analysis
+
+
+#Topic Modeling
+def display_topics(model, feature_names, num_top_words):
+    for topic_idx, topic in enumerate(model.components_):
+        print(f"Topic {topic_idx}: ", " ".join([feature_names[i] for i in topic.argsort()[:-num_top_words - 1:-1]]))
+
+
+
+#Latent Semantic Analysis using BoW
+bow_lsa_model = TruncatedSVD(n_components=5, random_state=42)
+lsa_topics_bow = bow_lsa_model.fit_transform(bow_model)
+print("LSA Topics (BoW):")
+display_topics(bow_lsa_model, vectorizer_bow.get_feature_names_out(), 10)
+print()
+
+# Visualizing LSA Topics using BoW
+plt.bar(range(5), bow_lsa_model.explained_variance_ratio_, alpha=0.5, align='center')
+plt.xlabel("Topic Index")
+plt.ylabel("Explained Variance")
+plt.title("LSA Explained Variance by Topic")
+plt.show()
+
+
+
+#Latent Dirichlet Allocation using BoW
+bow_lda_model = LatentDirichletAllocation(n_components=5, random_state=42)
+lda_topics_bow = bow_lda_model.fit_transform(bow_model)
+print("LDA Topics (BoW):")
+display_topics(bow_lda_model, vectorizer_bow.get_feature_names_out(), 10)
+print()
+
+# Visualizing LDA Topics using BoW
+numTopWords = 20  # Number of words to display
+words = np.array(vectorizer_bow.get_feature_names_out())
+# Extract top words indices for each topic
+top_word_indices = bow_lda_model.components_.argsort(axis=1)[:, -numTopWords:]
+# Get actual words
+sorted_words = np.array([words[idx] for idx in top_word_indices])
+# Create heatmap with sorted words
+sns.heatmap(bow_lda_model.components_[:, top_word_indices[0]], cmap="YlGnBu", 
+            xticklabels=sorted_words[0], yticklabels=[f"Topic {i}" for i in range(5)])
+plt.xlabel("Words")
+plt.ylabel("Topics")
+plt.title("LDA Topic Distribution (Top Words)")
+plt.xticks(rotation=45)
+plt.show()
+
+
+
+#Latent Semantic Analysis using TF-IDF
+tfidf_lsa_model = TruncatedSVD(n_components=5, algorithm='randomized', n_iter=10)
+tfidf_lsa = tfidf_lsa_model.fit_transform(tfidf_model)
+l = tfidf_lsa[0]
+print("LSA using TF-IDF")
+for i, topic in enumerate(l):
+    print("Topic", i, ":", topic * 100)
+print()
+
+#Latent Semantic Analysis using TF-IDF with words of each topic
+print("LSA Topics (TF-IDF) with Top Words and Percentages")
+lsa_percentages = tfidf_lsa[0] * 100
+words = np.array(vectorizer_tfidf.get_feature_names_out())
+num_top_words = 10 
+for i, topic in enumerate(tfidf_lsa_model.components_):
+    top_word_indices = topic.argsort()[-num_top_words:]  # Get top words for the topic
+    top_words = ", ".join(words[top_word_indices])  # Convert to readable format
+    print(f"Topic {i} ({lsa_percentages[i]:.2f}%): {top_words}")
+print()
+
+
+
+#Latent Dirichlet Allocation using TF-IDF
+tfidf_lda_model = LatentDirichletAllocation(n_components=5, learning_method="online", random_state=42)
+tfidf_lda = tfidf_lda_model.fit_transform(tfidf_model)
+print("LDA using TF-IDF")
+for i, topic in enumerate(tfidf_lda[0]):
+    print("Topic", i, ":", topic * 100, "%")
+print()
+
+#Latent Dirichlet Allocation using TF-IDF with words of each topic
+print("LDA Topics (TF-IDF) with Top Words and Percentages")
+topic_percentages = tfidf_lda[0] * 100 
+words = np.array(vectorizer_tfidf.get_feature_names_out())
+num_top_words = 10
+for i, topic in enumerate(tfidf_lda_model.components_):
+    top_word_indices = topic.argsort()[-num_top_words:]  # Get top words for the topic
+    top_words = ", ".join(words[top_word_indices])  # Convert to readable format
+    print(f"Topic {i} ({topic_percentages[i]:.2f}%): {top_words}")
+print()
