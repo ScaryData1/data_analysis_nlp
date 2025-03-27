@@ -1,0 +1,488 @@
+#Importing the necessary libraries
+import pandas as pd
+import matplotlib
+matplotlib.use("Qt5Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np  # Needed this to allocate words to the topics in LSA and LDA for TF-IDF and to better visualize the heatmap in LDA using BoW
+from kneed import KneeLocator   #To find the elbow/knee of the curve with coherence scores
+from spellchecker import SpellChecker # Realized I needed to fix spelling as the dataset contains words like aaccount instead of account
+import re # Realized I needed to use regular expressions instead of pandas to remove placeholders since the text is tokenized
+import nltk
+from nltk.corpus import stopwords
+from nltk import pos_tag
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD, LatentDirichletAllocation
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('punkt_tab')
+nltk.download('averaged_perceptron_tagger_eng')
+nltk.download('wordnet')
+#Import new libraries for coherence score calculation
+import gensim
+from gensim.models import CoherenceModel
+from gensim.corpora.dictionary import Dictionary
+from gensim.matutils import Dense2Corpus  #For Coherence model of LDA using TFIDF
+
+#Loading and correcting the dataset
+theFile = pd.read_csv("Consumer_Complaints.csv", nrows=10000) #I set the number of rows to 10000 as the whole dataset is to big to run for my computer and the fixing spelling mistakes takes very long
+dataframe = theFile["Consumer complaint narrative"].dropna()  #This let's us focus on just the “Consumer Complaints Narrative” section and remove blank complaints
+print("This is the text before it has been cleaned")
+print(dataframe.head())
+print()
+
+
+
+
+#Cleaning the text
+
+#Tokenize the text 
+dataframe = dataframe.apply(lambda x: word_tokenize(x)) 
+
+#Making the text lowercase and removing the punctuation
+def lowerAndRemovePunc(text):
+    return [word.lower() for word in text if word.isalpha()]
+dataframe = dataframe.apply(lowerAndRemovePunc)
+
+#Remove stopwords
+stop_words=set(stopwords.words('english'))
+def remove_stopwords(text):
+    return [word for word in text if word not in stop_words]
+dataframe = dataframe.apply(remove_stopwords)
+
+#Lemmatization
+lemmatizer = WordNetLemmatizer()
+def lemmatize_words(text):
+    # Tagging part of speech for each word, this was needed for more accurate lemmatization
+    tagged_words = pos_tag(text)
+    lemmatized_words = []
+    for word, tag in tagged_words:
+        # If the word is a verb
+        if tag.startswith('V'):
+            lemmatized_words.append(lemmatizer.lemmatize(word, pos='v'))
+        # If the word is a noun
+        elif tag.startswith('N'):
+            lemmatized_words.append(lemmatizer.lemmatize(word, pos='n'))
+        # If the word is an adjective
+        elif tag.startswith('J'):
+            lemmatized_words.append(lemmatizer.lemmatize(word, pos='a'))
+        else:
+            lemmatized_words.append(word)
+    return lemmatized_words
+dataframe = dataframe.apply(lemmatize_words)
+
+#Remove placeholders
+def remove_placeholder_tokens(tokens):
+    # Remove tokens that are entirely made up of 1 to 15 "x" characters using regular expressions instead of pandas on the tokenized text
+    return [token for token in tokens if not re.fullmatch(r'x{1,15}', token)]
+dataframe = dataframe.apply(remove_placeholder_tokens)
+
+#Convert the dataset back to a string since the need for tokenization is now done and fix spelling mistakes
+dataframe = dataframe.apply(lambda tokens: " ".join(tokens))
+spell = SpellChecker()
+def correct_text(text):
+    words = text.split()
+    corrected_words = [spell.correction(word) if spell.correction(word) else word for word in words]
+    return " ".join(corrected_words)
+dataframe = dataframe.apply(correct_text)
+print("This is the text after it has been cleaned")
+print(dataframe.head())
+print()
+
+
+
+
+
+
+
+
+
+#Text Vectorization
+
+#Vectorization with BoW
+vectorizer_bow = CountVectorizer()
+bow_model = vectorizer_bow.fit_transform(dataframe)
+bow_model = pd.DataFrame(bow_model.toarray(), columns = vectorizer_bow.get_feature_names_out())
+print("This is the BoW vector representations")
+print(bow_model)
+print()
+
+#Vectorization using TF-IDF
+vectorizer_tfidf = TfidfVectorizer(max_features=1000, stop_words="english", max_df=0.95, min_df=2)
+tfidf_model = vectorizer_tfidf.fit_transform(dataframe)
+tfidf_model = pd.DataFrame(tfidf_model.toarray(), columns = vectorizer_tfidf.get_feature_names_out())
+print("This is the TF-IDF vector representations")
+print(tfidf_model)
+print()
+
+
+
+
+#Semantic Analysis
+
+#Topic Modeling
+def display_topics(model, feature_names, num_top_words):
+    for topic_idx, topic in enumerate(model.components_):
+        print(f"Topic {topic_idx}: ", " ".join([feature_names[i] for i in topic.argsort()[:-num_top_words - 1:-1]]))
+
+
+
+
+#Getting the coherence score for LSA using BoW
+#First split the stringed text back into tokens
+dataframe = dataframe.apply(lambda x: word_tokenize(x))
+# Create a dictionary and corpus needed for gensim
+dictionary_lsa_bow = Dictionary(dataframe)
+# Define topic range (for example, from 2 to 20 topics)
+topic_range = range(2, 21)
+lsa_coherence_scores_bow = []
+
+# Loop over different numbers of topics
+for num_topics in topic_range:
+    # Build the LSA model using TruncatedSVD on the BoW matrix
+    generate_lsa_bow_model = TruncatedSVD(n_components=num_topics, random_state=42)
+    generate_lsa_bow_model.fit(bow_model)
+    
+    # Extract topics: get top 10 words for each topic using the components_ attribute
+    topics = []
+    feature_names = vectorizer_bow.get_feature_names_out()
+    for topic_idx, component in enumerate(generate_lsa_bow_model.components_):
+        # Get indices of top 10 words for the topic
+        top_indices = component.argsort()[-10:]
+        topic_words = [feature_names[i] for i in top_indices]
+        topics.append(topic_words)
+    
+    # Compute coherence score using the extracted topics
+    coherence_model = CoherenceModel(topics=topics,
+                                     texts=dataframe,
+                                     dictionary=dictionary_lsa_bow,
+                                     coherence='c_v', processes=1)
+    coherence = coherence_model.get_coherence()
+    lsa_coherence_scores_bow.append(coherence)
+    print(f"BoW LSA - Number of Topics: {num_topics}, Coherence Score: {coherence:.4f}")
+
+# Convert these to lists for kneed
+x_lsa_bow = list(topic_range)
+y_lsa_bow = lsa_coherence_scores_bow
+
+# Initialize KneeLocator
+# curve='convex' and direction='increasing' usually works if your coherence 
+# increases and then levels off. 
+knee_finder_lsa = KneeLocator(x_lsa_bow, y_lsa_bow, curve='convex', direction='decreasing', S=1.0)
+
+elbow_lsa_bow = knee_finder_lsa.knee
+
+# Plot the coherence scores for LSA with BoW
+plt.figure(figsize=(8, 5))
+plt.plot(topic_range, lsa_coherence_scores_bow, marker='o')
+plt.scatter(elbow_lsa_bow, y_lsa_bow[x_lsa_bow.index(elbow_lsa_bow)], color='red', label=f'Elbow at {elbow_lsa_bow}', zorder=3)
+plt.xlabel("Number of Topics")
+plt.ylabel("Coherence Score (c_v)")
+plt.title("LSA Coherence Score vs. Number of Topics (BoW)")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+print()
+print(f"Elbow (knee) point based on kneed: {elbow_lsa_bow}")
+#Convert the dataset back to a string once again to continue
+dataframe = dataframe.apply(lambda tokens: " ".join(tokens))
+print()
+
+
+
+
+#Latent Semantic Analysis using BoW
+bow_lsa_model = TruncatedSVD(n_components=elbow_lsa_bow, random_state=42)
+lsa_topics_bow = bow_lsa_model.fit_transform(bow_model)
+print("LSA Topics (BoW):")
+display_topics(bow_lsa_model, vectorizer_bow.get_feature_names_out(), 10)
+print()
+
+# Visualizing LSA Topics using BoW
+plt.bar(range(elbow_lsa_bow), bow_lsa_model.explained_variance_ratio_, alpha=0.5, align='center')
+plt.xlabel("Topic Index")
+plt.ylabel("Explained Variance")
+plt.title("LSA Explained Variance by Topic")
+plt.show()
+
+
+
+
+
+
+
+
+
+#Getting the coherence score for LDA using BoW
+#First split the stringed text back into tokens
+dataframe = dataframe.apply(lambda x: word_tokenize(x))
+# Create a dictionary and corpus needed for gensim
+dictionary_lda_bow = Dictionary(dataframe)
+corpus_lda_bow = [dictionary_lda_bow.doc2bow(text) for text in dataframe]
+
+#Firstly the coherence score for LDA
+# Initialize list to store coherence scores and define topic range
+coherence_scores_lda_bow = []
+topic_range_lda_bow = range(2, 21)  # Testing topics from 2 to 20
+# Loop over different numbers of topics to compute coherence scores
+for j in topic_range_lda_bow:
+    generate_lda_bow_model = gensim.models.LdaModel(corpus=corpus_lda_bow,
+                                       id2word=dictionary_lda_bow,
+                                       num_topics=j,
+                                       random_state=42,
+                                       update_every=1,
+                                       chunksize=100,
+                                       passes=10,
+                                       alpha='auto')
+    coherence_model_lda_bow = CoherenceModel(model=generate_lda_bow_model, texts=dataframe, dictionary=dictionary_lda_bow, coherence='c_v', processes=1)
+    coherence_lda_bow = coherence_model_lda_bow.get_coherence()
+    coherence_scores_lda_bow.append(coherence_lda_bow)
+    print(f"LDA BoW - Number of Topics: {j}  Coherence Score: {coherence_lda_bow:.4f}")
+
+
+# Convert these to lists for curvative method
+x_lda_bow = list(topic_range_lda_bow)
+y_lda_bow = coherence_scores_lda_bow
+
+# Assuming x_lda_bow (number of topics) and y_lda_bow (coherence scores) are defined
+x = np.array(x_lda_bow)  
+y = np.array(y_lda_bow)
+
+# Compute first derivative (slope)
+dy_dx = np.gradient(y, x)
+
+# Compute second derivative (curvature)
+d2y_dx2 = np.gradient(dy_dx, x)
+
+# Find the index where curvature is most negative (strongest drop)
+elbow_index = np.argmin(d2y_dx2)
+elbow_point_bow = x[elbow_index]
+
+# Plot results
+plt.figure(figsize=(8, 5))
+plt.plot(x, y, marker='o', label='Coherence Score')
+plt.scatter(elbow_point_bow, y[elbow_index], color='red', label=f'Elbow at {elbow_point_bow}', zorder=3)
+plt.xlabel("Number of Topics")
+plt.ylabel("Coherence Score (c_v)")
+plt.title("Finding the Elbow Using Curvature Method")
+plt.legend()
+plt.grid(True)
+plt.show()
+print()
+print(f"Elbow (optimal number of topics) found at: {elbow_point_bow}")
+#Convert the dataset back to a string once again to continue
+dataframe = dataframe.apply(lambda tokens: " ".join(tokens))
+print()
+
+
+
+
+#Latent Dirichlet Allocation using BoW
+bow_lda_model = LatentDirichletAllocation(n_components=elbow_point_bow, random_state=42)
+lda_topics_bow = bow_lda_model.fit_transform(bow_model)
+print("LDA Topics (BoW):")
+display_topics(bow_lda_model, vectorizer_bow.get_feature_names_out(), 10)
+print()
+
+# Visualizing LDA Topics using BoW
+numTopWords = 20  # Number of words to display
+words = np.array(vectorizer_bow.get_feature_names_out())
+# Extract top words indices for each topic
+top_word_indices = bow_lda_model.components_.argsort(axis=1)[:, -numTopWords:]
+# Get actual words
+sorted_words = np.array([words[idx] for idx in top_word_indices])
+# Create heatmap with sorted words
+sns.heatmap(bow_lda_model.components_[:, top_word_indices[0]], cmap="YlGnBu", 
+            xticklabels=sorted_words[0], yticklabels=[f"Topic {i}" for i in range(elbow_point_bow)])
+plt.xlabel("Words")
+plt.ylabel("Topics")
+plt.title("LDA Topic Distribution (Top Words)")
+plt.xticks(rotation=45)
+plt.show()
+
+
+
+
+
+
+
+
+
+#Getting the coherence score for LSA using TF-IDF
+#First split the stringed text back into tokens
+dataframe = dataframe.apply(lambda x: word_tokenize(x))
+# Create a dictionary and corpus needed for gensim
+dictionary_lsa_tfidf = Dictionary(dataframe)
+# Define topic range (for example, from 2 to 20 topics)
+topic_range = range(2, 21)
+lsa_coherence_scores_tfidf = []
+
+# Loop over different numbers of topics
+for num_topics in topic_range:
+    # Build the LSA model using TruncatedSVD on the BoW matrix
+    generate_lsa_tfidf_model = TruncatedSVD(n_components=num_topics, random_state=42)
+    generate_lsa_tfidf_model.fit(tfidf_model)
+    
+    # Extract topics: get top 10 words for each topic using the components_ attribute
+    topics = []
+    feature_names = vectorizer_tfidf.get_feature_names_out()
+    for topic_idx, component in enumerate(generate_lsa_tfidf_model.components_):
+        # Get indices of top 10 words for the topic
+        top_indices = component.argsort()[-10:]
+        topic_words = [feature_names[i] for i in top_indices]
+        topics.append(topic_words)
+    
+    # Compute coherence score using the extracted topics
+    coherence_model = CoherenceModel(topics=topics,
+                                     texts=dataframe,
+                                     dictionary=dictionary_lsa_tfidf,
+                                     coherence='c_v', processes=1)
+    coherence = coherence_model.get_coherence()
+    lsa_coherence_scores_tfidf.append(coherence)
+    print(f"TF-IDF LSA - Number of Topics: {num_topics}, Coherence Score: {coherence:.4f}")
+
+# Convert these to lists for kneed
+x_lsa_tfidf = list(topic_range)
+y_lsa_tfidf = lsa_coherence_scores_tfidf
+
+# Initialize KneeLocator
+# curve='convex' and direction='increasing' usually works if your coherence 
+# increases and then levels off. 
+knee_finder_lsa = KneeLocator(x_lsa_tfidf, y_lsa_tfidf, curve='convex', direction='decreasing', S=1.0)
+
+elbow_lsa_tfidf = knee_finder_lsa.knee
+
+# Plot the coherence scores for LSA with TF-IDF
+plt.figure(figsize=(8, 5))
+plt.plot(topic_range, lsa_coherence_scores_tfidf, marker='o')
+plt.scatter(elbow_lsa_tfidf, y_lsa_tfidf[x_lsa_tfidf.index(elbow_lsa_tfidf)], color='red', label=f'Elbow at {elbow_lsa_tfidf}', zorder=3)
+plt.xlabel("Number of Topics")
+plt.ylabel("Coherence Score (c_v)")
+plt.title("LSA Coherence Score vs. Number of Topics (TF-IDF)")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+print()
+print(f"Elbow (knee) point based on kneed: {elbow_lsa_tfidf}")
+#Convert the dataset back to a string once again to continue
+dataframe = dataframe.apply(lambda tokens: " ".join(tokens))
+print()
+
+
+
+
+#Latent Semantic Analysis using TF-IDF
+tfidf_lsa_model = TruncatedSVD(n_components=elbow_lsa_tfidf, algorithm='randomized', n_iter=10)
+tfidf_lsa = tfidf_lsa_model.fit_transform(tfidf_model)
+l = tfidf_lsa[0]
+print("LSA using TF-IDF")
+for i, topic in enumerate(l):
+    print("Topic", i, ":", topic * 100)
+print()
+
+#Latent Semantic Analysis using TF-IDF with words of each topic
+print("LSA Topics (TF-IDF) with Top Words and Percentages")
+lsa_percentages = tfidf_lsa[0] * 100
+words = np.array(vectorizer_tfidf.get_feature_names_out())
+num_top_words = 10 
+for i, topic in enumerate(tfidf_lsa_model.components_):
+    top_word_indices = topic.argsort()[-num_top_words:]  # Get top words for the topic
+    top_words = ", ".join(words[top_word_indices])  # Convert to readable format
+    print(f"Topic {i} ({lsa_percentages[i]:.2f}%): {top_words}")
+print()
+
+
+
+
+
+
+
+
+
+#Getting the Coherence score for LDA using TF-IDF
+#First split the stringed text back into tokens
+dataframe = dataframe.apply(lambda x: word_tokenize(x))
+# Create a dictionary and corpus needed for gensim
+dictionary_lda_tfidf = Dictionary(dataframe)
+corpus_lda_tfidf = Dense2Corpus(tfidf_model.values, documents_columns=False)
+
+#Firstly the coherence score for LDA
+# Initialize list to store coherence scores and define topic range
+coherence_scores_lda_tfidf = []
+topic_range_lda_tfidf = range(2, 21)  # Testing topics from 2 to 20
+# Loop over different numbers of topics to compute coherence scores
+for i in topic_range_lda_tfidf:
+    generate_lda_tfidf_model = gensim.models.LdaModel(corpus=corpus_lda_tfidf,
+                                       id2word=dictionary_lda_tfidf,
+                                       num_topics=i,
+                                       random_state=42,
+                                       update_every=1,
+                                       chunksize=100,
+                                       passes=10,
+                                       alpha='auto')
+    coherence_model_lda_tfidf = CoherenceModel(model=generate_lda_tfidf_model, texts=dataframe, dictionary=dictionary_lda_tfidf, coherence='c_v', processes=1)
+    coherence_lda_tfidf = coherence_model_lda_tfidf.get_coherence()
+    coherence_scores_lda_tfidf.append(coherence_lda_tfidf)
+    print(f"LDA TF-IDF - Number of Topics: {i}  Coherence Score: {coherence_lda_tfidf:.4f}")
+
+# Convert these to lists for kneed
+x_lda_tfidf = list(topic_range_lda_tfidf)
+y_lda_tfidf = coherence_scores_lda_tfidf
+
+# Assuming x_lda_tfidf (number of topics) and y_lda_tfidf (coherence scores) are defined
+x = np.array(x_lda_tfidf)  
+y = np.array(y_lda_tfidf)
+
+# Compute first derivative (slope)
+dy_dx = np.gradient(y, x)
+
+# Compute second derivative (curvature)
+d2y_dx2 = np.gradient(dy_dx, x)
+
+# Find the index where curvature is most negative (strongest drop)
+elbow_index = np.argmin(d2y_dx2)
+elbow_point_tfidf = x[elbow_index]
+
+# Plot results
+plt.figure(figsize=(8, 5))
+plt.plot(x, y, marker='o', label='Coherence Score')
+plt.scatter(elbow_point_tfidf, y[elbow_index], color='red', label=f'Elbow at {elbow_point_tfidf}', zorder=3)
+plt.xlabel("Number of Topics")
+plt.ylabel("Coherence Score (c_v)")
+plt.title("Finding the Elbow Using Curvature Method")
+plt.legend()
+plt.grid(True)
+plt.show()
+print()
+print(f"Elbow (optimal number of topics) found at: {elbow_point_tfidf}")
+
+#Convert the dataset back to a string once again to continue
+dataframe = dataframe.apply(lambda tokens: " ".join(tokens))
+print()
+
+
+
+
+#Latent Dirichlet Allocation using TF-IDF
+tfidf_lda_model = LatentDirichletAllocation(n_components=elbow_point_tfidf, learning_method="online", random_state=42)
+tfidf_lda = tfidf_lda_model.fit_transform(tfidf_model)
+print("LDA using TF-IDF")
+for i, topic in enumerate(tfidf_lda[0]):
+    print("Topic", i, ":", topic * 100, "%")
+print()
+
+#Latent Dirichlet Allocation using TF-IDF with words of each topic
+print("LDA Topics (TF-IDF) with Top Words and Percentages")
+topic_percentages = tfidf_lda[0] * 100 
+words = np.array(vectorizer_tfidf.get_feature_names_out())
+num_top_words = 10
+for i, topic in enumerate(tfidf_lda_model.components_):
+    top_word_indices = topic.argsort()[-num_top_words:]  # Get top words for the topic
+    top_words = ", ".join(words[top_word_indices])  # Convert to readable format
+    print(f"Topic {i} ({topic_percentages[i]:.2f}%): {top_words}")
+print()
